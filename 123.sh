@@ -17,7 +17,6 @@ detect_os() {
         echo "Unsupported OS" >&2
         exit 1
     fi
-
     echo "Detected OS: $OS"
     echo "Start detect OS ... finished"
 }
@@ -59,8 +58,8 @@ install_docker_if_not_exists() {
         rm get-docker.sh
     fi
     systemctl start docker
-    set -e
     echo "Install docker ... finished"
+    set -e
 }
 
 # Function to install Docker Compose
@@ -84,60 +83,32 @@ install_docker_compose_if_not_exists() {
     echo "Install docker compose ... finished"
 }
 
-# Function to set installation directory
-set_install_dir() {
-    INSTALL_DIR='/opt'
-    export INSTALL_DIR
-
-    echo "Where do you want Psono to be installed..."
-    read -p "INSTALL_DIR [default: $INSTALL_DIR]: " INSTALL_DIR_NEW
-    if [ "$INSTALL_DIR_NEW" != "" ]; then
-        INSTALL_DIR=$INSTALL_DIR_NEW
+# Function to stop running containers
+stop_container_if_running() {
+    echo "Stopping docker container"
+    if [ -d "$INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX" ]; then
+        pushd $INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX > /dev/null
+        docker-compose down 2>/dev/null || true
+        popd > /dev/null
     fi
-
-    mkdir -p $INSTALL_DIR
-    cd $INSTALL_DIR
-    rm -Rf $INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX
-    mkdir -p $INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX
+    echo "Stopping docker container ... finished"
 }
 
-# Function to ask for parameters
-ask_parameters() {
-    if [ -f "$INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX/.psonoenv" ]; then
-        set -o allexport
-        source $INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX/.psonoenv
-        set +o allexport
-    else
-        export PSONO_PROTOCOL="http://"
-        export PSONO_VERSION=EE
-        export PSONO_EXTERNAL_PORT=80
-        export PSONO_EXTERNAL_PORT_SECURE=443
-        export PSONO_POSTGRES_PORT=5432
-        export PSONO_POSTGRES_PASSWORD=$(date +%s | sha256sum | base64 | head -c 16)
-        export PSONO_USERDOMAIN=localhost
-        export PSONO_WEBDOMAIN='psono.local'
-        export PSONO_POSTGRES_USER=postgres
-        export PSONO_POSTGRES_DB=postgres
-        export PSONO_POSTGRES_HOST=$PSONO_DOCKER_PREFIX-psono-postgres
-        export PSONO_INSTALL_ACME=0
-    fi
-
-    echo "What version do you want to install? (Usually EE. Potential other choices are CE or DEV)"
-    read -p "PSONO_VERSION [default: $PSONO_VERSION]: " PSONO_VERSION_NEW
-    if [ "$PSONO_VERSION_NEW" != "" ]; then
-        export PSONO_VERSION=$PSONO_VERSION_NEW
-    fi
-
-    if [[ ! $PSONO_VERSION =~ ^(DEV|EE|CE)$ ]]; then
-        echo "unknown PSONO_VERSION: $PSONO_VERSION" >&2
+# Function to test if ports are available
+test_if_ports_are_free() {
+    echo "Test for port availability"
+    if lsof -Pi :80 -sTCP:LISTEN -t >/dev/null ; then
+        echo "Port 80 is occupied" >&2
         exit 1
     fi
-
-    # Add other parameter prompts here...
-    # (The rest of the ask_parameters function remains the same)
+    if lsof -Pi :443 -sTCP:LISTEN -t >/dev/null ; then
+        echo "Port 443 is occupied" >&2
+        exit 1
+    fi
+    echo "Test for port availability ... finished"
 }
 
-# Function to install Git (for DEV version)
+# Function to install Git
 install_git() {
     echo "Install git"
     if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
@@ -148,20 +119,6 @@ install_git() {
         which git || yum install -y git
     fi
     echo "Install git ... finished"
-}
-
-# Function to test if ports are free
-test_if_ports_are_free() {
-    echo "Test for port availability"
-    if lsof -Pi :80 -sTCP:LISTEN -t >/dev/null; then
-        echo "Port 80 is occupied" >&2
-        exit 1
-    fi
-    if lsof -Pi :443 -sTCP:LISTEN -t >/dev/null; then
-        echo "Port 443 is occupied" >&2
-        exit 1
-    fi
-    echo "Test for port availability ... finished"
 }
 
 # Function to create DH parameters
@@ -218,16 +175,77 @@ create_self_signed_certificate_if_not_exists() {
     echo "Create self signed certificate if it does not exist"
     mkdir -p $INSTALL_DIR/psono/certificates
     if [ ! -f "$INSTALL_DIR/psono/certificates/private.key" ]; then
-        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-            -keyout $INSTALL_DIR/psono/certificates/private.key \
-            -out $INSTALL_DIR/psono/certificates/public.crt \
-            -config $INSTALL_DIR/psono/certificates/openssl.conf -batch
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout $INSTALL_DIR/psono/certificates/private.key \
+            -out $INSTALL_DIR/psono/certificates/public.crt -config $INSTALL_DIR/psono/certificates/openssl.conf -batch
     fi
     echo "Create self signed certificate ... finished"
 }
 
-# Add other functions here...
-# (Include all the remaining functions from your original script)
+# Function to create config.json
+create_config_json() {
+    echo "Create config.json"
+    mkdir -p $INSTALL_DIR/psono/config
+    cat > $INSTALL_DIR/psono/config/config.json <<EOF
+{
+  "backend_servers": [{
+    "title": "Demo",
+    "url": "${PSONO_PROTOCOL}${PSONO_WEBDOMAIN}/server",
+    "domain": "${PSONO_USERDOMAIN}"
+  }],
+  "base_url": "${PSONO_PROTOCOL}${PSONO_WEBDOMAIN}/",
+  "allow_custom_server": true
+}
+EOF
+    echo "Create config.json ... finished"
+}
+
+# Function to pull Docker images
+docker_compose_pull() {
+    echo "Update docker images"
+    pushd $INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX > /dev/null
+    docker-compose pull
+    popd > /dev/null
+    echo "Update docker images ... finished"
+}
+
+# Function to start the stack
+start_stack() {
+    echo "Start the stack"
+    pushd $INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX > /dev/null
+    docker-compose up -d
+    popd > /dev/null
+    echo "Start the stack ... finished"
+}
+
+# Function to install alias
+install_alias() {
+    echo "Install alias"
+    if [ ! -f ~/.bash_aliases ]; then
+        touch ~/.bash_aliases
+    fi
+    sed -i '/^alias psonoctl=/d' ~/.bash_aliases
+    echo "alias psonoctl='cd $INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX && docker-compose'" >> ~/.bash_aliases
+    echo "Install alias ... finished"
+}
+
+# Function to install ACME
+install_acme() {
+    if [ "$PSONO_INSTALL_ACME" == "1" ]; then
+        echo "Install acme.sh"
+        mkdir -p $INSTALL_DIR/psono/html
+        curl https://get.acme.sh | sh
+        $INSTALL_DIR/.acme.sh/acme.sh --issue -d $PSONO_WEBDOMAIN -w $INSTALL_DIR/psono/html
+        $INSTALL_DIR/.acme.sh/acme.sh --install-cert -d $PSONO_WEBDOMAIN \
+            --key-file       $INSTALL_DIR/psono/certificates/private.key  \
+            --fullchain-file $INSTALL_DIR/psono/certificates/public.crt \
+            --reloadcmd     "cd $INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX/ && docker-compose restart proxy"
+        
+        if ! crontab -l | grep "$INSTALL_DIR/.acme.sh/acme.sh --install-cert"; then
+            (crontab -l 2>/dev/null; echo "0 */12 * * * $INSTALL_DIR/.acme.sh/acme.sh --install-cert -d $PSONO_WEBDOMAIN --key-file $INSTALL_DIR/psono/certificates/private.key --fullchain-file $INSTALL_DIR/psono/certificates/public.crt --reloadcmd \"cd $INSTALL_DIR/psono/$PSONO_DOCKER_PREFIX/ && docker-compose restart proxy\" > /dev/null") | crontab -
+        fi
+        echo "Install acme.sh ... finished"
+    fi
+}
 
 # Main function
 main() {
@@ -245,18 +263,26 @@ main() {
         mkdir -p $INSTALL_DIR/psono/$dir
     done
 
-    if [ "$PSONO_VERSION" == "DEV" ]; then
+if [ "$PSONO_VERSION" == "DEV" ]; then
         install_git
-        # Clone repositories for DEV version
+
+        echo "Checkout psono-server git repository"
         if [ ! -d "$INSTALL_DIR/psono/psono-server" ]; then
             git clone https://gitlab.com/psono/psono-server.git $INSTALL_DIR/psono/psono-server
         fi
+        echo "Checkout psono-server git repository ... finished"
+        
+        echo "Checkout psono-client git repository"
         if [ ! -d "$INSTALL_DIR/psono/psono-client" ]; then
             git clone https://gitlab.com/psono/psono-client.git $INSTALL_DIR/psono/psono-client
         fi
+        echo "Checkout psono-client git repository ... finished"
+        
+        echo "Checkout psono-fileserver git repository"
         if [ ! -d "$INSTALL_DIR/psono/psono-fileserver" ]; then
             git clone https://gitlab.com/psono/psono-fileserver.git $INSTALL_DIR/psono/psono-fileserver
         fi
+        echo "Checkout psono-fileserver git repository ... finished"
     fi
 
     create_dhparam_if_not_exists
@@ -273,7 +299,6 @@ main() {
 
     echo ""
     echo "========================="
-    echo "Installation Complete!"
     echo "CLIENT URL : https://$PSONO_WEBDOMAIN"
     echo "ADMIN URL : https://$PSONO_WEBDOMAIN/portal/"
     echo ""
@@ -288,3 +313,6 @@ main() {
     echo "========================="
     echo ""
 }
+
+# Call the main function to start the installation
+main
